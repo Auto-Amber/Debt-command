@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Debt Command — Payoff Strategy Planner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0f14; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; }
+  input, select, button { font-family: inherit; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #151820; } ::-webkit-scrollbar-thumb { background: #252a3a; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const C = {
+  bg:"#0d0f14", surface:"#151820", card:"#1c2030", border:"#252a3a",
+  accent:"#f0b429", teal:"#2a9d8f", red:"#e05c5c", green:"#4caf7d",
+  text:"#e8eaf0", muted:"#7a8099", label:"#4a5168"
+};
+
+const fmt = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(n||0);
+const pct = n => `${(parseFloat(n)||0).toFixed(2)}%`;
+
+// ── DATA ──────────────────────────────────────────────────────────────────────
+const SEED_DEBTS = [
+  {name:"Bank of America",  balance:"34783.02", apr:"22.49", minPayment:"1000", dueDay:"9"},
+  {name:"Capital One",      balance:"4443.58",  apr:"28.4",  minPayment:"49",   dueDay:"17"},
+  {name:"Chase Slate",      balance:"4090.22",  apr:"26.49", minPayment:"131",  dueDay:"8"},
+  {name:"Chase Prime",      balance:"21328.15", apr:"25.74", minPayment:"683",  dueDay:"16"},
+  {name:"BECU",             balance:"18745",    apr:"16.49", minPayment:"356",  dueDay:"1"},
+];
+const SEED_BILLS = [
+  {name:"Mortgage",             amount:"4712.55", dueDay:"1",  notes:""},
+  {name:"PSE (Natural Gas)",    amount:"212.79",  dueDay:"4",  notes:"1 month behind — normal ~$96-117/mo"},
+  {name:"Amazon Music",         amount:"25",      dueDay:"5",  notes:""},
+  {name:"Disney+",              amount:"22.09",   dueDay:"5",  notes:""},
+  {name:"Amazon Prime Ultra",   amount:"3",       dueDay:"7",  notes:""},
+  {name:"Life Insurance",       amount:"500",     dueDay:"8",  notes:""},
+  {name:"Comcast",              amount:"151",     dueDay:"22", notes:""},
+  {name:"Storage Unit",         amount:"229",     dueDay:"25", notes:""},
+  {name:"Amber Coaching",       amount:"400",     dueDay:"25", notes:""},
+  {name:"T-Mobile",             amount:"247",     dueDay:"28", notes:"Verify amount"},
+  {name:"Car Insurance",        amount:"245",     dueDay:"28", notes:""},
+  {name:"PUD (Electricity)",    amount:"307.75",  dueDay:"30", notes:"Confirm normal due day once current"},
+  {name:"Kam Therapy",          amount:"300",     dueDay:"0",  notes:"Varies ~$300/mo"},
+  {name:"Gas (Vehicle)",        amount:"350",     dueDay:"0",  notes:"Estimate $300-400/mo"},
+  {name:"Dining Out",           amount:"200",     dueDay:"0",  notes:"~1-2x/month family of 5"},
+  {name:"Groceries",            amount:"1100",    dueDay:"0",  notes:"Estimate — 5 people, 3 teens"},
+  {name:"Pest Control (Home)",  amount:"70",      dueDay:"0",  notes:"Monthly"},
+  {name:"Pest Control (Rental)",amount:"250",     dueDay:"0",  notes:"Quarterly ~$83/mo avg"},
+  {name:"Car Tabs",             amount:"17",      dueDay:"0",  notes:"$200/yr ~$17/mo"},
+  {name:"Medical (Est.)",       amount:"17",      dueDay:"0",  notes:"~$200/yr"},
+  {name:"Water Bill",           amount:"0",       dueDay:"0",  notes:"PLACEHOLDER — need login"},
+  {name:"Waste Management",     amount:"0",       dueDay:"0",  notes:"PLACEHOLDER — need amount"},
+  {name:"Back to School (Sept)",amount:"0",       dueDay:"0",  notes:"PLACEHOLDER — one-time September"},
+];
+const SEED_INCOME = [
+  {source:"Shoreline Paycheck (Amber)", amount:"3800", day:"10", frequency:"biweekly", notes:"10th & 25th"},
+  {source:"Kam Income",                 amount:"1200", day:"10", frequency:"biweekly", notes:"10th & 25th"},
+  {source:"Child Support",              amount:"2220", day:"",   frequency:"monthly",  notes:"3rd Wednesday"},
+  {source:"Rental Income",              amount:"825",  day:"10", frequency:"monthly",  notes:""},
+];
+
+// ── STORAGE ───────────────────────────────────────────────────────────────────
+function load(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+  catch { return fallback; }
+}
+function save(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+
+// ── STRATEGY ──────────────────────────────────────────────────────────────────
+function computeStrategy(debts, method, extra) {
+  if (!debts.length) return [];
+  const items = debts.map(d => ({
+    ...d,
+    bal: parseFloat(d.balance)||0,
+    rate: (parseFloat(d.apr)||0)/100/12,
+    min: parseFloat(d.minPayment)||0,
+    payoffMonth: null, totalInterest: 0
+  })).filter(d=>d.bal>0)
+    .sort((a,b)=> method==="avalanche" ? b.rate-a.rate : a.bal-b.bal);
+
+  let month=0;
+  const MAX=600;
+  while(items.some(d=>d.bal>0) && month<MAX){
+    month++;
+    let pool = parseFloat(extra)||0;
+    items.forEach(d=>{
+      if(d.bal>0){
+        const interest = d.bal*d.rate;
+        d.bal += interest;
+        d.totalInterest += interest;
+        const pay = Math.min(Math.max(d.min, interest+1), d.bal);
+        d.bal -= pay;
+      }
+    });
+    for(const d of items){
+      if(d.bal>0 && pool>0){ const pay=Math.min(pool,d.bal); d.bal-=pay; pool-=pay; }
+    }
+    items.forEach(d=>{ if(d.bal<=0.01&&d.payoffMonth===null){d.bal=0;d.payoffMonth=month;} });
+  }
+  return items;
+}
+
+function monthLabel(n){
+  if(!n) return "—";
+  const d=new Date(); d.setMonth(d.getMonth()+n);
+  return d.toLocaleDateString("en-US",{month:"short",year:"numeric"});
+}
+
+// ── UI HELPERS ────────────────────────────────────────────────────────────────
+const IS = { width:"100%", background:C.surface, border:`1px solid ${C.border}`, borderRadius:7, color:C.text, fontSize:14, padding:"9px 11px", outline:"none", boxSizing:"border-box" };
+
+function Input({style,...p}){ return <input style={{...IS,...style}} {...p}/>; }
+function Sel({children,...p}){ return <select style={{...IS}} {...p}>{children}</select>; }
+
+function Btn({onClick,children,variant="primary",small,danger,style={}}){
+  const bg=danger?C.red:variant==="primary"?C.accent:C.card;
+  const col=danger?"#fff":variant==="primary"?"#0d0f14":C.muted;
+  return <button onClick={onClick} style={{background:bg,color:col,border:danger?"none":`1px solid ${C.border}`,borderRadius:7,padding:small?"6px 14px":"9px 20px",fontSize:small?12:14,fontWeight:600,cursor:"pointer",...style}}>{children}</button>;
+}
+
+function Field({label,children}){
+  return <div style={{marginBottom:14}}>
+    <label style={{display:"block",color:C.muted,fontSize:11,letterSpacing:"1.5px",textTransform:"uppercase",marginBottom:5}}>{label}</label>
+    {children}
+  </div>;
+}
+
+function Modal({title,onClose,children}){
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,width:"100%",maxWidth:480,boxShadow:"0 24px 64px rgba(0,0,0,.6)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"18px 22px 14px",borderBottom:`1px solid ${C.border}`}}>
+        <span style={{color:C.text,fontWeight:700,fontSize:15}}>{title}</span>
+        <button onClick={onClose} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:22,lineHeight:1}}>×</button>
+      </div>
+      <div style={{padding:"20px 22px 24px"}}>{children}</div>
+    </div>
+  </div>;
+}
+
+// ── FORMS ─────────────────────────────────────────────────────────────────────
+function DebtForm({item,onSave,onClose}){
+  const [f,setF]=useState(item||{name:"",balance:"",apr:"",minPayment:"",dueDay:""});
+  const s=k=>e=>setF(p=>({...p,[k]:e.target.value}));
+  return <>
+    <Field label="Creditor / Card Name"><Input placeholder="e.g. Chase Slate" value={f.name} onChange={s("name")}/></Field>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      <Field label="Balance ($)"><Input type="number" placeholder="0.00" value={f.balance} onChange={s("balance")}/></Field>
+      <Field label="APR (%)"><Input type="number" placeholder="24.99" value={f.apr} onChange={s("apr")}/></Field>
+      <Field label="Min Payment ($)"><Input type="number" placeholder="25" value={f.minPayment} onChange={s("minPayment")}/></Field>
+      <Field label="Due Day"><Input type="number" placeholder="15" min="1" max="31" value={f.dueDay} onChange={s("dueDay")}/></Field>
+    </div>
+    <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:4}}>
+      <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+      <Btn onClick={()=>{onSave(f);onClose();}}>Save</Btn>
+    </div>
+  </>;
+}
+
+function BillForm({item,onSave,onClose}){
+  const [f,setF]=useState(item||{name:"",amount:"",dueDay:"",notes:""});
+  const s=k=>e=>setF(p=>({...p,[k]:e.target.value}));
+  return <>
+    <Field label="Bill Name"><Input placeholder="e.g. T-Mobile" value={f.name} onChange={s("name")}/></Field>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      <Field label="Amount ($)"><Input type="number" placeholder="0.00" value={f.amount} onChange={s("amount")}/></Field>
+      <Field label="Due Day"><Input type="number" placeholder="1" min="1" max="31" value={f.dueDay} onChange={s("dueDay")}/></Field>
+    </div>
+    <Field label="Notes (optional)"><Input placeholder="Fixed / varies / estimate" value={f.notes} onChange={s("notes")}/></Field>
+    <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:4}}>
+      <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+      <Btn onClick={()=>{onSave(f);onClose();}}>Save</Btn>
+    </div>
+  </>;
+}
+
+function IncomeForm({item,onSave,onClose}){
+  const [f,setF]=useState(item||{source:"",amount:"",day:"",frequency:"monthly",notes:""});
+  const s=k=>e=>setF(p=>({...p,[k]:e.target.value}));
+  return <>
+    <Field label="Source"><Input placeholder="e.g. Shoreline Paycheck" value={f.source} onChange={s("source")}/></Field>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      <Field label="Amount ($)"><Input type="number" placeholder="0.00" value={f.amount} onChange={s("amount")}/></Field>
+      <Field label="Day Received"><Input type="number" placeholder="10" min="1" max="31" value={f.day} onChange={s("day")}/></Field>
+    </div>
+    <Field label="Frequency">
+      <Sel value={f.frequency} onChange={s("frequency")}>
+        <option value="monthly">Monthly</option>
+        <option value="biweekly">Bi-weekly (×2/mo)</option>
+        <option value="weekly">Weekly (×4.33/mo)</option>
+        <option value="once">One-time / Bonus</option>
+      </Sel>
+    </Field>
+    <Field label="Notes"><Input placeholder="Net / gross / estimated" value={f.notes} onChange={s("notes")}/></Field>
+    <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:4}}>
+      <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+      <Btn onClick={()=>{onSave(f);onClose();}}>Save</Btn>
+    </div>
+  </>;
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────────────────────
+function App(){
+  const [tab,setTab] = useState("debts");
+  const [debts,setDebts] = useState(()=>load("dc_debts",SEED_DEBTS));
+  const [bills,setBills] = useState(()=>load("dc_bills",SEED_BILLS));
+  const [income,setIncome] = useState(()=>load("dc_income",SEED_INCOME));
+  const [method,setMethod] = useState(()=>load("dc_method","avalanche"));
+  const [extra,setExtra] = useState(()=>load("dc_extra",1467));
+  const [modal,setModal] = useState(null);
+
+  // auto-save
+  useEffect(()=>save("dc_debts",debts),[debts]);
+  useEffect(()=>save("dc_bills",bills),[bills]);
+  useEffect(()=>save("dc_income",income),[income]);
+  useEffect(()=>save("dc_method",method),[method]);
+  useEffect(()=>save("dc_extra",extra),[extra]);
+
+  const totalDebt = debts.reduce((s,d)=>s+(parseFloat(d.balance)||0),0);
+  const totalBills = bills.reduce((s,b)=>s+(parseFloat(b.amount)||0),0);
+  const totalMins = debts.reduce((s,d)=>s+(parseFloat(d.minPayment)||0),0);
+  const totalIncome = income.reduce((s,i)=>{
+    const a=parseFloat(i.amount)||0;
+    if(i.frequency==="biweekly") return s+a*2;
+    if(i.frequency==="weekly") return s+a*4.33;
+    return s+a;
+  },0);
+  const netAvailable = totalIncome - totalBills - totalMins;
+
+  const TABS = [
+    {id:"debts",   label:`Debts (${debts.length})`},
+    {id:"bills",   label:`Bills (${bills.length})`},
+    {id:"income",  label:`Income (${income.length})`},
+    {id:"strategy",label:"Strategy"},
+    {id:"cashflow",label:"Cash Flow"},
+  ];
+
+  // ── STRATEGY ──
+  function StrategyView(){
+    const results = computeStrategy(debts,method,extra);
+    const totalInt = results.reduce((s,d)=>s+(d.totalInterest||0),0);
+    const lastMonth = Math.max(...results.map(d=>d.payoffMonth||0));
+    return <div>
+      {/* summary */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:24}}>
+        {[
+          {label:"Total Debt",        val:fmt(totalDebt),  color:C.red},
+          {label:"Est. Total Interest",val:fmt(totalInt),  color:C.accent},
+          {label:"Debt-Free By",       val:monthLabel(lastMonth), color:C.green},
+        ].map(c=><div key={c.label} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 18px",borderTop:`3px solid ${c.color}`}}>
+          <div style={{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:"1.5px",marginBottom:6}}>{c.label}</div>
+          <div style={{color:c.color,fontSize:20,fontWeight:700,fontFamily:"monospace"}}>{c.val}</div>
+        </div>)}
+      </div>
+
+      {/* controls */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 18px",marginBottom:20}}>
+        <div style={{display:"flex",gap:20,flexWrap:"wrap",alignItems:"flex-end"}}>
+          <div>
+            <div style={{color:C.muted,fontSize:11,letterSpacing:"1.5px",textTransform:"uppercase",marginBottom:8}}>Method</div>
+            <div style={{display:"flex",gap:8}}>
+              {["avalanche","snowball"].map(m=><button key={m} onClick={()=>setMethod(m)} style={{padding:"7px 16px",borderRadius:7,border:`1px solid ${method===m?C.accent:C.border}`,background:method===m?C.accent:C.card,color:method===m?"#0d0f14":C.muted,fontWeight:600,fontSize:13,cursor:"pointer",textTransform:"capitalize"}}>{m}</button>)}
+            </div>
+            <div style={{color:C.label,fontSize:11,marginTop:5}}>{method==="avalanche"?"Highest APR first — saves most interest":"Lowest balance first — fastest wins"}</div>
+          </div>
+          <div>
+            <div style={{color:C.muted,fontSize:11,letterSpacing:"1.5px",textTransform:"uppercase",marginBottom:8}}>Extra Monthly Payment</div>
+            <Input type="number" value={extra} onChange={e=>setExtra(e.target.value)} style={{width:160}}/>
+            <div style={{color:netAvailable>0?C.green:C.red,fontSize:11,marginTop:5}}>~{fmt(netAvailable)} available after mins + bills</div>
+          </div>
+        </div>
+      </div>
+
+      {/* payoff list */}
+      <div style={{color:C.muted,fontSize:11,letterSpacing:"1.5px",textTransform:"uppercase",marginBottom:10}}>
+        Payoff Order — {method==="avalanche"?"Highest APR → Lowest":"Lowest Balance → Highest"}
+      </div>
+      {results.map((d,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",background:C.card,border:`1px solid ${C.border}`,borderLeft:`4px solid ${i===0?C.accent:C.border}`,borderRadius:"0 8px 8px 0",marginBottom:6}}>
+        <div style={{minWidth:26,height:26,borderRadius:"50%",background:i===0?C.accent:C.surface,color:i===0?"#0d0f14":C.muted,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700}}>{i+1}</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{color:C.text,fontWeight:600,fontSize:14,marginBottom:2}}>{d.name}</div>
+          <div style={{color:C.muted,fontSize:12}}>{fmt(parseFloat(d.balance))} · {pct(d.apr)} APR</div>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{color:C.accent,fontSize:12,marginBottom:2}}>+{fmt(d.totalInterest)} interest</div>
+          <div style={{color:C.green,fontWeight:700,fontSize:14}}>{monthLabel(d.payoffMonth)}</div>
+        </div>
+      </div>)}
+    </div>;
+  }
+
+  // ── CASH FLOW ──
+  function CashFlowView(){
+    const events = [
+      ...income.map(i=>({type:"income",label:i.source,amount:parseFloat(i.amount)||0,day:parseInt(i.day)||1,freq:i.frequency})),
+      ...bills.map(b=>({type:"bill",label:b.name,amount:parseFloat(b.amount)||0,day:parseInt(b.dueDay)||0})),
+      ...debts.map(d=>({type:"debt",label:`${d.name} (min)`,amount:parseFloat(d.minPayment)||0,day:parseInt(d.dueDay)||0})),
+    ].filter(e=>e.day>0).sort((a,b)=>a.day-b.day);
+
+    return <div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:12,marginBottom:24}}>
+        {[
+          {label:"Monthly Income",  val:fmt(totalIncome), color:C.green},
+          {label:"Monthly Bills",   val:fmt(totalBills),  color:C.muted},
+          {label:"Debt Minimums",   val:fmt(totalMins),   color:C.red},
+          {label:"Net Available",   val:fmt(netAvailable),color:netAvailable>=0?C.accent:C.red},
+        ].map(c=><div key={c.label} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 16px"}}>
+          <div style={{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:"1.5px",marginBottom:4}}>{c.label}</div>
+          <div style={{color:c.color,fontSize:20,fontWeight:700,fontFamily:"monospace"}}>{c.val}</div>
+        </div>)}
+      </div>
+      <div style={{color:C.muted,fontSize:11,letterSpacing:"1.5px",textTransform:"uppercase",marginBottom:10}}>Monthly Schedule — by Day</div>
+      {events.map((e,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 14px",background:C.card,border:`1px solid ${C.border}`,borderLeft:`4px solid ${e.type==="income"?C.green:e.type==="debt"?C.red:C.accent}`,borderRadius:"0 8px 8px 0",marginBottom:5}}>
+        <div style={{minWidth:30,height:30,borderRadius:7,background:e.type==="income"?"#1a3d2b":e.type==="debt"?"#3d1a1a":"#2a2210",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:e.type==="income"?C.green:e.type==="debt"?C.red:C.accent}}>{e.day}</div>
+        <div style={{flex:1,color:C.text,fontSize:14}}>{e.label}{e.freq&&e.freq!=="monthly"?<span style={{color:C.muted,fontSize:11,marginLeft:6,textTransform:"capitalize"}}>{e.freq}</span>:null}</div>
+        <span style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:e.type==="income"?C.green:C.text}}>{e.type==="income"?"+":"-"}{fmt(e.amount)}</span>
+      </div>)}
+    </div>;
+  }
+
+  // ── LIST ROWS ──
+  function DebtRow({d,idx}){
+    return <div style={{display:"flex",alignItems:"center",gap:10,padding:"13px 14px",background:C.card,border:`1px solid ${C.border}`,borderRadius:8,marginBottom:6}}>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{color:C.text,fontWeight:600,fontSize:14}}>{d.name}</div>
+        <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pct(d.apr)} APR · Due day {d.dueDay||"?"}</div>
+      </div>
+      <div style={{textAlign:"right",marginRight:8}}>
+        <div style={{color:C.accent,fontFamily:"monospace",fontWeight:700}}>{fmt(d.balance)}</div>
+        <div style={{color:C.muted,fontSize:12}}>min {fmt(d.minPayment)}</div>
+      </div>
+      <Btn small variant="ghost" onClick={()=>setModal({type:"editDebt",item:d,idx})}>Edit</Btn>
+      <Btn small danger onClick={()=>setDebts(p=>p.filter((_,i)=>i!==idx))}>✕</Btn>
+    </div>;
+  }
+
+  function BillRow({b,idx}){
+    return <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",background:C.card,border:`1px solid ${C.border}`,borderRadius:8,marginBottom:5}}>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{color:C.text,fontWeight:600,fontSize:14}}>{b.name}</div>
+        {b.notes?<div style={{color:C.muted,fontSize:11,marginTop:2}}>{b.notes}</div>:null}
+      </div>
+      <div style={{textAlign:"right",marginRight:8}}>
+        <div style={{color:C.text,fontFamily:"monospace"}}>{fmt(b.amount)}</div>
+        <div style={{color:C.muted,fontSize:12}}>Day {b.dueDay||"TBD"}</div>
+      </div>
+      <Btn small variant="ghost" onClick={()=>setModal({type:"editBill",item:b,idx})}>Edit</Btn>
+      <Btn small danger onClick={()=>setBills(p=>p.filter((_,i)=>i!==idx))}>✕</Btn>
+    </div>;
+  }
+
+  function IncomeRow({inc,idx}){
+    return <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",background:C.card,border:`1px solid ${C.border}`,borderRadius:8,marginBottom:5}}>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{color:C.text,fontWeight:600,fontSize:14}}>{inc.source}</div>
+        <div style={{color:C.muted,fontSize:12,marginTop:2,textTransform:"capitalize"}}>{inc.frequency}{inc.notes?` · ${inc.notes}`:""}</div>
+      </div>
+      <div style={{textAlign:"right",marginRight:8}}>
+        <div style={{color:C.green,fontFamily:"monospace",fontWeight:700}}>{fmt(inc.amount)}</div>
+        {inc.day?<div style={{color:C.muted,fontSize:12}}>Day {inc.day}</div>:null}
+      </div>
+      <Btn small variant="ghost" onClick={()=>setModal({type:"editIncome",item:inc,idx})}>Edit</Btn>
+      <Btn small danger onClick={()=>setIncome(p=>p.filter((_,i)=>i!==idx))}>✕</Btn>
+    </div>;
+  }
+
+  return <div style={{background:C.bg,minHeight:"100vh",color:C.text,paddingBottom:60}}>
+    {/* HEADER */}
+    <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,padding:"16px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}}>
+      <div>
+        <div style={{fontSize:20,fontWeight:800,letterSpacing:"-0.5px"}}>
+          <span style={{color:C.accent}}>DEBT</span><span style={{color:C.text}}> COMMAND</span>
+        </div>
+        <div style={{color:C.muted,fontSize:10,letterSpacing:"2px",textTransform:"uppercase"}}>Payoff Strategy Planner</div>
+      </div>
+      <div style={{color:C.muted,fontSize:12,textAlign:"right"}}>
+        <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:"1px",marginBottom:2}}>Today</div>
+        <div style={{fontFamily:"monospace",color:C.text}}>{new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</div>
+      </div>
+    </div>
+
+    <div style={{maxWidth:700,margin:"0 auto",padding:"20px 14px 0"}}>
+      {/* TABS */}
+      <div style={{display:"flex",gap:2,background:C.surface,borderRadius:10,padding:4,marginBottom:24,overflowX:"auto"}}>
+        {TABS.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{flex:"0 0 auto",padding:"8px 12px",borderRadius:7,border:"none",background:tab===t.id?C.accent:"none",color:tab===t.id?"#0d0f14":C.muted,fontWeight:tab===t.id?700:500,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>{t.label}</button>)}
+      </div>
+
+      {/* DEBTS */}
+      {tab==="debts"&&<div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{color:C.muted,fontSize:12}}>Total: <span style={{color:C.accent,fontFamily:"monospace",fontWeight:700}}>{fmt(totalDebt)}</span></div>
+          <Btn onClick={()=>setModal({type:"addDebt"})}>+ Add Debt</Btn>
+        </div>
+        {debts.map((d,i)=><DebtRow key={i} d={d} idx={i}/>)}
+      </div>}
+
+      {/* BILLS */}
+      {tab==="bills"&&<div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{color:C.muted,fontSize:12}}>Total: <span style={{color:C.text,fontFamily:"monospace",fontWeight:700}}>{fmt(totalBills)}/mo</span></div>
+          <Btn onClick={()=>setModal({type:"addBill"})}>+ Add Bill</Btn>
+        </div>
+        {bills.map((b,i)=><BillRow key={i} b={b} idx={i}/>)}
+      </div>}
+
+      {/* INCOME */}
+      {tab==="income"&&<div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{color:C.muted,fontSize:12}}>Monthly: <span style={{color:C.green,fontFamily:"monospace",fontWeight:700}}>{fmt(totalIncome)}</span></div>
+          <Btn onClick={()=>setModal({type:"addIncome"})}>+ Add Income</Btn>
+        </div>
+        {income.map((inc,i)=><IncomeRow key={i} inc={inc} idx={i}/>)}
+      </div>}
+
+      {/* STRATEGY */}
+      {tab==="strategy"&&<StrategyView/>}
+
+      {/* CASH FLOW */}
+      {tab==="cashflow"&&<CashFlowView/>}
+    </div>
+
+    {/* MODALS */}
+    {modal?.type==="addDebt"&&<Modal title="Add Debt" onClose={()=>setModal(null)}><DebtForm onSave={f=>setDebts(p=>[...p,f])} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="editDebt"&&<Modal title="Edit Debt" onClose={()=>setModal(null)}><DebtForm item={modal.item} onSave={f=>setDebts(p=>p.map((d,i)=>i===modal.idx?f:d))} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="addBill"&&<Modal title="Add Bill" onClose={()=>setModal(null)}><BillForm onSave={f=>setBills(p=>[...p,f])} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="editBill"&&<Modal title="Edit Bill" onClose={()=>setModal(null)}><BillForm item={modal.item} onSave={f=>setBills(p=>p.map((b,i)=>i===modal.idx?f:b))} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="addIncome"&&<Modal title="Add Income" onClose={()=>setModal(null)}><IncomeForm onSave={f=>setIncome(p=>[...p,f])} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="editIncome"&&<Modal title="Edit Income" onClose={()=>setModal(null)}><IncomeForm item={modal.item} onSave={f=>setIncome(p=>p.map((inc,i)=>i===modal.idx?f:inc))} onClose={()=>setModal(null)}/></Modal>}
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
